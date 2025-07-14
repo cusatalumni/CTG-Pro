@@ -92,8 +92,7 @@ const Certificate: React.FC<CertificateProps> = ({ name, score, totalQuestions, 
                                 <img src={logoDataUrl} alt="Company Logo" className="max-w-full max-h-full object-contain" />
                            ) : (
                                 <div className="text-center font-bold text-2xl text-amber-800 p-2">
-
- <span className="text-4xl font-black text-amber-800 font-serif">CTG</span>
+                                   <span className="text-4xl font-black text-amber-800 font-serif">CTG</span>
                             <span className="text-xs font-semibold text-amber-900">EST. 2014</span>
                                 </div>
                            )}
@@ -105,8 +104,8 @@ const Certificate: React.FC<CertificateProps> = ({ name, score, totalQuestions, 
                     
                     <h1 className="text-5xl font-serif text-amber-800 my-4 break-words" style={{fontFamily: "'Cormorant Garamond', serif"}}>{name}</h1>
                     
-                    <p className="text-lg text-gray-600">for successfully completing the</p>
-                    <p className="text-3xl font-semibold text-gray-800 font-serif my-2">Concrete Technology Proficiency Certificate</p>
+                    <p className="text-lg text-gray-600">for successfully completing the proficiency certificate from</p>
+                    <p className="text-3xl font-semibold text-gray-800 font-serif my-2">Concrete Technology Group</p>
                     
                     <div className="flex items-center justify-center my-4">
                         <p className="text-lg italic text-gray-700 max-w-2xl mx-auto">"{standardMessage}"</p>
