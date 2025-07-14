@@ -1,0 +1,434 @@
+
+
+import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
+import { Question, QuizStatus } from './types';
+import { getHint } from './services/geminiService';
+import Spinner from './components/Spinner';
+import { CheckIcon, XIcon, LightbulbIcon } from './components/icons';
+import Certificate from './components/Certificate';
+import { useAuth } from './context/AuthContext';
+import AuthScreen from './components/auth/AuthScreen';
+import EmbedModal from './components/EmbedModal';
+import ProGate from './components/ProGate';
+
+
+const QUIZ_LENGTH = 20;
+const GOOGLE_SHEET_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vTfT1NU4iS6T_dYt5R0QVrbPn1X0WfgUU84xBws3GjX-DQwWzHv-mGItn11R5iYIkZbF6Sltfa_qc66/pub?output=csv';
+const PASSING_PERCENTAGE = 75;
+const QUESTION_TIME_LIMIT = 45; // Changed to 45 seconds
+const CORRECT_ANSWER_DELAY = 1000; // 2 seconds for correct answer
+const WRONG_ANSWER_DELAY = 3000; // 3 seconds for wrong answer
+
+// Utility to shuffle an array
+const shuffleArray = <T,>(array: T[]): T[] => {
+  return [...array].sort(() => Math.random() - 0.5);
+};
+
+
+const shuffleAndSelectQuestions = (questions: Question[], count: number): Question[] => {
+  if (questions.length === 0) return [];
+  const shuffled = [...questions].sort(() => 0.5 - Math.random());
+  return shuffled.slice(0, Math.min(count, questions.length));
+};
+
+const parseCsv = (csvText: string): Question[] => {
+    const CsvRowRegex = /,(?=(?:(?:[^"]*"){2})*[^"]*$)/;
+    const rows = csvText.trim().split(/\r?\n/).slice(1);
+
+    return rows.map(rowStr => {
+        if (!rowStr.trim()) return null;
+        const columns = rowStr.split(CsvRowRegex);
+        if (columns.length !== 3) return null;
+
+        const clean = (s: string) => {
+            if (s.startsWith('"') && s.endsWith('"')) {
+                return s.substring(1, s.length - 1).replace(/""/g, '"');
+            }
+            return s;
+        };
+
+        const questionText = clean(columns[0]);
+        const optionsStr = clean(columns[1]);
+        const correctAnswerIndexStr = clean(columns[2]);
+        const correctAnswerIndex = parseInt(correctAnswerIndexStr, 10);
+
+        if (!questionText || !optionsStr || isNaN(correctAnswerIndex)) return null;
+
+        const options = optionsStr.split('|').map(o => o.trim());
+        if (options.length === 0 || options.some(o => !o)) return null;
+        
+        return {
+            questionText: questionText.trim(),
+            options: options,
+            correctAnswerIndex: correctAnswerIndex,
+        };
+    }).filter((q): q is Question => q !== null);
+};
+
+
+const App: React.FC = () => {
+  const { user, logout } = useAuth();
+  const [quizStatus, setQuizStatus] = useState<QuizStatus>('not-started');
+  const [allQuestions, setAllQuestions] = useState<Question[]>([]);
+  const [questions, setQuestions] = useState<Question[]>([]); // These are the prepared questions with shuffled options
+  const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
+  const [score, setScore] = useState(0);
+  const [selectedAnswerIndex, setSelectedAnswerIndex] = useState<number | null>(null);
+  const [userAnswers, setUserAnswers] = useState<(number | null)[]>([]);
+  const [isAnswered, setIsAnswered] = useState(false);
+  const [hint, setHint] = useState<string | null>(null);
+  const [isHintLoading, setIsHintLoading] = useState(false);
+  const [isDataLoading, setIsDataLoading] = useState<boolean>(true);
+  const [dataError, setDataError] = useState<string | null>(null);
+  const [candidateName, setCandidateName] = useState<string>('');
+  const [timeLeft, setTimeLeft] = useState(QUESTION_TIME_LIMIT);
+  const [isEmbedModalOpen, setIsEmbedModalOpen] = useState(false);
+  const advanceTimeoutRef = useRef<number | null>(null);
+  
+  useEffect(() => {
+    if (user) {
+      setCandidateName(user.name || user.email);
+    }
+  }, [user]);
+
+  useEffect(() => {
+    const fetchQuestions = async () => {
+        setIsDataLoading(true);
+        setDataError(null);
+        try {
+            const response = await fetch(GOOGLE_SHEET_URL);
+            if (!response.ok) {
+                throw new Error(`Failed to fetch questions: ${response.status} ${response.statusText}`);
+            }
+            const csvText = await response.text();
+            const parsedQuestions = parseCsv(csvText);
+            if(parsedQuestions.length === 0) {
+              throw new Error("No questions could be parsed from the data source. Please check the format.");
+            }
+            setAllQuestions(parsedQuestions);
+        } catch (err) {
+            const errorMessage = err instanceof Error ? err.message : 'An unknown error occurred.';
+            console.error("Error fetching or parsing questions:", err);
+            setDataError(`Could not load quiz questions. ${errorMessage}`);
+        } finally {
+            setIsDataLoading(false);
+        }
+    };
+    fetchQuestions();
+  }, []);
+
+  useEffect(() => {
+    // Cleanup timeout on component unmount
+    return () => {
+      if (advanceTimeoutRef.current) {
+        clearTimeout(advanceTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  const handleNextQuestion = useCallback(() => {
+    if (currentQuestionIndex < questions.length - 1) {
+      setCurrentQuestionIndex(prevIndex => prevIndex + 1);
+      setSelectedAnswerIndex(null);
+      setIsAnswered(false);
+      setHint(null);
+      setIsHintLoading(false);
+    } else {
+      setQuizStatus('completed');
+    }
+  }, [currentQuestionIndex, questions.length]);
+  
+  const handleTimeUp = useCallback(() => {
+    if (isAnswered) return;
+    setIsAnswered(true);
+    const newAnswers = [...userAnswers];
+    newAnswers[currentQuestionIndex] = null;
+    setUserAnswers(newAnswers);
+
+    advanceTimeoutRef.current = window.setTimeout(() => {
+      handleNextQuestion();
+    }, WRONG_ANSWER_DELAY);
+  }, [isAnswered, userAnswers, currentQuestionIndex, handleNextQuestion]);
+
+  useEffect(() => {
+    if (quizStatus !== 'in-progress' || isAnswered) return;
+    if (timeLeft === 0) {
+        handleTimeUp();
+        return;
+    }
+    const timerId = setInterval(() => setTimeLeft(prevTime => prevTime - 1), 1000);
+    return () => clearInterval(timerId);
+  }, [quizStatus, isAnswered, timeLeft, handleTimeUp]);
+
+  useEffect(() => {
+    if (quizStatus === 'in-progress') setTimeLeft(QUESTION_TIME_LIMIT);
+  }, [currentQuestionIndex, quizStatus]);
+
+  const startQuiz = useCallback(() => {
+    if (allQuestions.length === 0 || !candidateName.trim()) return;
+    
+    const selectedRawQuestions = shuffleAndSelectQuestions(allQuestions, QUIZ_LENGTH);
+    
+    const preparedQuestions = selectedRawQuestions.map(q => {
+      const correctAnswerText = q.options[q.correctAnswerIndex];
+      const shuffledOptions = shuffleArray(q.options);
+      const newCorrectAnswerIndex = shuffledOptions.indexOf(correctAnswerText);
+      return {
+        ...q,
+        options: shuffledOptions,
+        correctAnswerIndex: newCorrectAnswerIndex,
+      };
+    });
+
+    setQuestions(preparedQuestions);
+    setScore(0);
+    setCurrentQuestionIndex(0);
+    setSelectedAnswerIndex(null);
+    setIsAnswered(false);
+    setHint(null);
+    setUserAnswers(new Array(preparedQuestions.length).fill(null));
+    setQuizStatus('in-progress');
+  }, [allQuestions, candidateName]);
+
+  const handleAnswerSelect = (selectedIndex: number) => {
+    if (isAnswered) return;
+
+    const newAnswers = [...userAnswers];
+    newAnswers[currentQuestionIndex] = selectedIndex;
+    setUserAnswers(newAnswers);
+
+    setSelectedAnswerIndex(selectedIndex);
+    setIsAnswered(true);
+
+    const isCorrect = selectedIndex === questions[currentQuestionIndex].correctAnswerIndex;
+    if (isCorrect) {
+      setScore(prevScore => prevScore + 1);
+    }
+
+    const delay = isCorrect ? CORRECT_ANSWER_DELAY : WRONG_ANSWER_DELAY;
+    
+    advanceTimeoutRef.current = window.setTimeout(() => {
+      handleNextQuestion();
+    }, delay);
+  };
+
+  const handleFetchHint = async () => {
+    if (hint || isHintLoading || isAnswered) return;
+    setIsHintLoading(true);
+    const questionText = questions[currentQuestionIndex].questionText;
+    const fetchedHint = await getHint(questionText);
+    setHint(fetchedHint);
+    setIsHintLoading(false);
+  };
+
+  const currentQuestion = useMemo(() => {
+    return questions[currentQuestionIndex];
+  }, [questions, currentQuestionIndex]);
+
+  const getOptionClasses = (index: number) => {
+    if (!isAnswered) {
+      return "bg-slate-700 hover:bg-slate-600";
+    }
+    const isCorrect = index === currentQuestion.correctAnswerIndex;
+    if (isCorrect) return "bg-green-500/50 border-green-500 scale-105";
+    if (index === selectedAnswerIndex && !isCorrect) return "bg-red-500/50 border-red-500";
+    return "bg-slate-800 text-slate-400 cursor-not-allowed opacity-70";
+  };
+  
+  const renderQuizScreen = () => (
+    <div className="w-full max-w-2xl mx-auto p-4 md:p-8">
+      <div className="mb-6 flex justify-between items-center">
+        <div>
+          <p className="text-lg font-medium text-cyan-400 mb-2">
+            Question {currentQuestionIndex + 1} of {questions.length}
+          </p>
+          <div className="w-full bg-slate-700 rounded-full h-2.5">
+            <div className="bg-cyan-500 h-2.5 rounded-full" style={{ width: `${((currentQuestionIndex + 1) / questions.length) * 100}%` }}></div>
+          </div>
+        </div>
+        <div className={`text-4xl font-bold ${timeLeft <= 5 ? 'text-red-500 animate-pulse' : 'text-cyan-400'}`}>
+          {timeLeft}
+        </div>
+      </div>
+
+      <h2 className="text-2xl md:text-3xl font-bold text-white mb-8 min-h-[8rem]">{currentQuestion?.questionText}</h2>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+        {currentQuestion?.options.map((option, index) => (
+          <button
+            key={index}
+            onClick={() => handleAnswerSelect(index)}
+            disabled={isAnswered}
+            className={`w-full p-4 rounded-lg text-white font-semibold text-left transition-all duration-300 border-2 border-transparent flex items-center justify-between ${getOptionClasses(index)}`}
+          >
+            <span>{option}</span>
+            {isAnswered && index === currentQuestion.correctAnswerIndex && <CheckIcon className="w-6 h-6 text-green-300" />}
+            {isAnswered && index === selectedAnswerIndex && index !== currentQuestion.correctAnswerIndex && <XIcon className="w-6 h-6 text-red-300" />}
+          </button>
+        ))}
+      </div>
+      
+      <div className="mt-8 flex flex-col sm:flex-row items-center justify-center gap-4">
+        <div className="w-full sm:w-auto min-h-[52px] flex items-center justify-center sm:justify-start">
+            {!hint && !isAnswered && (
+              <button onClick={handleFetchHint} disabled={isHintLoading} className="w-full sm:w-auto flex items-center justify-center gap-2 px-4 py-2 rounded-md bg-amber-500/20 text-amber-400 hover:bg-amber-500/30 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+                {isHintLoading ? <Spinner /> : <LightbulbIcon className="w-5 h-5" />}
+                <span>{isHintLoading ? "Getting Hint..." : "Get a Hint"}</span>
+              </button>
+            )}
+            {hint && <p className="text-slate-400 italic text-center sm:text-left bg-slate-800 p-3 rounded-lg max-w-md">{hint}</p>}
+        </div>
+      </div>
+    </div>
+  );
+
+  const renderStartScreen = () => (
+    <div className="text-center w-full max-w-3xl">
+       <div className="flex justify-end w-full">
+         <button onClick={logout} className="text-slate-400 hover:text-white transition">Logout</button>
+       </div>
+       <img src="https://annapoornainfo.com/images/ctglogo.png" alt="Concrete Technology Group Logo" className="w-32 h-auto mx-auto mb-6" />
+      <h1 className="text-5xl md:text-6xl font-extrabold text-white mb-2">
+        Concrete Technology Group
+      </h1>
+      <p className="text-cyan-400 text-2xl mb-4">Civil Engineering Quiz</p>
+      <p className="text-slate-300 text-lg md:text-xl max-w-2xl mx-auto mb-8">
+        Welcome, {candidateName}! You'll face {QUIZ_LENGTH > allQuestions.length && allQuestions.length > 0 ? allQuestions.length : QUIZ_LENGTH} random questions with shuffled options. Each question has a {QUESTION_TIME_LIMIT}-second time limit. Good luck!
+      </p>
+
+      {isDataLoading && (
+        <div className="flex flex-col items-center justify-center gap-4">
+            <Spinner />
+            <p className="text-slate-400">Loading Questions...</p>
+        </div>
+      )}
+      {dataError && <p className="text-red-400 bg-red-500/20 p-4 rounded-lg">{dataError}</p>}
+      {!isDataLoading && !dataError && (
+        <>
+          <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
+            <button
+              onClick={startQuiz}
+              disabled={allQuestions.length === 0}
+              className="bg-cyan-600 hover:bg-cyan-500 text-white font-bold py-4 px-10 rounded-lg text-xl transition-transform transform hover:scale-105 disabled:bg-slate-700 disabled:cursor-not-allowed disabled:scale-100"
+            >
+              Start Quiz
+            </button>
+             <button
+              onClick={() => setIsEmbedModalOpen(true)}
+              className="bg-slate-600 hover:bg-slate-500 text-white font-bold py-4 px-10 rounded-lg text-xl transition-transform transform hover:scale-105"
+            >
+              Embed
+            </button>
+          </div>
+          <p className="text-slate-500 mt-8">
+            An initiative by Concrete Technology Group | <a href="https://annapoornainfo.com" target="_blank" rel="noopener noreferrer" className="hover:text-cyan-400">annapoornainfo.com</a>
+          </p>
+        </>
+      )}
+    </div>
+  );
+
+  const renderResultScreen = () => {
+    const percentage = questions.length > 0 ? Math.round((score / questions.length) * 100) : 0;
+    const hasPassed = percentage >= PASSING_PERCENTAGE;
+    const getStaticFeedback = () => {
+        if (hasPassed) return "Congratulations! You've passed!";
+        if (percentage >= 50) return "Great effort! You're getting close.";
+        return "Keep practicing to improve your score!";
+    };
+
+    return (
+        <div className="text-center bg-slate-800/50 p-8 rounded-2xl shadow-2xl backdrop-blur-sm border border-slate-700 max-w-2xl w-full">
+            <h1 className="text-4xl font-bold text-white mb-2">Quiz Completed!</h1>
+            <div className="min-h-[3rem] flex items-center justify-center my-4">
+                <p className="text-2xl font-semibold text-cyan-400">{getStaticFeedback()}</p>
+            </div>
+            <p className="text-slate-300 text-lg mb-4">You scored</p>
+            <p className="text-7xl font-bold text-white mb-6">{score} <span className="text-3xl font-medium text-slate-400">/ {questions.length}</span></p>
+            <div className="w-full bg-slate-700 rounded-full h-4 mb-8">
+                <div className={`h-4 rounded-full ${hasPassed ? 'bg-gradient-to-r from-green-400 to-cyan-500' : 'bg-gradient-to-r from-amber-500 to-red-500'}`} style={{ width: `${percentage}%` }}></div>
+            </div>
+            <div className="flex flex-col sm:flex-row gap-4 justify-center">
+                 <button onClick={() => setQuizStatus('review')} className="bg-slate-600 hover:bg-slate-500 text-white font-bold py-3 px-8 rounded-lg text-lg transition-transform transform hover:scale-105">Review Answers</button>
+                <button onClick={() => setQuizStatus('not-started')} className="bg-cyan-600 hover:bg-cyan-500 text-white font-bold py-3 px-8 rounded-lg text-lg transition-transform transform hover:scale-105">Play Again</button>
+            </div>
+             {hasPassed && (
+                <div className="mt-6">
+                    <button onClick={() => setQuizStatus('certificate')} className="bg-amber-500 hover:bg-amber-400 text-slate-900 font-bold py-3 px-8 rounded-lg text-lg transition-transform transform hover:scale-105 animate-pulse">View Certificate</button>
+                </div>
+            )}
+        </div>
+    );
+  };
+
+  const renderReviewScreen = () => (
+    <div className="w-full max-w-3xl mx-auto p-4 md:p-8">
+        <h1 className="text-4xl font-bold text-white mb-8 text-center">Review Answers</h1>
+        <div className="space-y-8">
+            {questions.map((q, qIndex) => (
+                <div key={qIndex} className="bg-slate-800/50 p-6 rounded-xl border border-slate-700">
+                    <p className="text-lg font-medium text-cyan-400 mb-2">Question {qIndex + 1}</p>
+                    <h2 className="text-xl font-bold text-white mb-4">{q.questionText}</h2>
+                    <div className="space-y-3">
+                        {q.options.map((option, oIndex) => {
+                            const isCorrect = oIndex === q.correctAnswerIndex;
+                            const isUserAnswer = oIndex === userAnswers[qIndex];
+                             const getReviewOptionClasses = () => {
+                                if (isCorrect) return "bg-green-500/30 border-green-500";
+                                if (isUserAnswer && !isCorrect) return "bg-red-500/30 border-red-500";
+                                return "bg-slate-800 border-slate-700";
+                            };
+                            return (
+                                <div key={oIndex} className={`p-3 rounded-lg text-white text-left border-2 flex items-center justify-between ${getReviewOptionClasses()}`}>
+                                    <span>{option}</span>
+                                    {isCorrect && <CheckIcon className="w-5 h-5 text-green-300" />}
+                                    {isUserAnswer && !isCorrect && <XIcon className="w-5 h-5 text-red-300" />}
+                                </div>
+                            );
+                        })}
+                    </div>
+                    {userAnswers[qIndex] === null && <p className="text-amber-400 italic mt-4 text-sm">You ran out of time for this question.</p>}
+                </div>
+            ))}
+        </div>
+        <div className="text-center mt-12">
+            <button onClick={() => setQuizStatus('not-started')} className="bg-cyan-600 hover:bg-cyan-500 text-white font-bold py-4 px-10 rounded-lg text-xl transition-transform transform hover:scale-105">Play Again</button>
+        </div>
+    </div>
+  );
+  
+  const renderCertificateScreen = () => (
+      <Certificate name={candidateName} score={score} totalQuestions={questions.length} onBack={() => setQuizStatus('completed')}/>
+  );
+
+  const renderQuizContent = () => {
+    switch(quizStatus) {
+        case 'not-started': return renderStartScreen();
+        case 'in-progress': return currentQuestion ? renderQuizScreen() : renderStartScreen();
+        case 'completed': return renderResultScreen();
+        case 'review': return renderReviewScreen();
+        case 'certificate': return renderCertificateScreen();
+        default: return renderStartScreen();
+    }
+  }
+
+  // Main application router based on auth state
+  const renderContent = () => {
+    if (!user) {
+        return <AuthScreen />;
+    }
+    if (!user.isPro) {
+        return <ProGate />;
+    }
+    return renderQuizContent();
+  }
+  
+  return (
+    <main className="min-h-screen w-full flex items-center justify-center bg-slate-900 text-white p-4 font-sans bg-[radial-gradient(ellipse_80%_80%_at_50%_-20%,rgba(120,119,198,0.3),rgba(255,255,255,0))]">
+      {isEmbedModalOpen && <EmbedModal onClose={() => setIsEmbedModalOpen(false)} />}
+      {renderContent()}
+    </main>
+  );
+};
+
+export default App;
