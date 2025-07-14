@@ -92,8 +92,8 @@ const Certificate: React.FC<CertificateProps> = ({ name, score, totalQuestions, 
                                 <img src={logoDataUrl} alt="Company Logo" className="max-w-full max-h-full object-contain" />
                            ) : (
                                 <div className="text-center font-bold text-2xl text-amber-800 p-2">
-                                   <span className="text-4xl font-black text-amber-800 font-serif">CTG</span>
-                            <span className="text-xs font-semibold text-amber-900">EST. 2014</span>
+                                   <span className="text-4xl font-black text-amber-800 font-serif">CTG</span></div><br>
+                            <span className="text-xs font-semibold text-amber-900">EST. 2011</span>
                                 </div>
                            )}
                         </div>
