@@ -1,6 +1,5 @@
 
-
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 
 interface CertificateProps {
   name: string;
@@ -13,6 +12,37 @@ interface CertificateProps {
 declare const html2pdf: any;
 
 const Certificate: React.FC<CertificateProps> = ({ name, score, totalQuestions, onBack }) => {
+  const [logoDataUrl, setLogoDataUrl] = useState<string | null>(null);
+  const [logoError, setLogoError] = useState(false);
+
+  useEffect(() => {
+    const logoUrl = 'https://annapoornainfo.com/images/ctglogo.png';
+    
+    const fetchAndEncodeLogo = async () => {
+      try {
+        const response = await fetch(logoUrl);
+        if (!response.ok) {
+            throw new Error(`Logo fetch failed with status: ${response.status}`);
+        }
+        const blob = await response.blob();
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          setLogoDataUrl(reader.result as string);
+        };
+        reader.onerror = () => {
+            console.error("FileReader error on logo blob.");
+            setLogoError(true);
+        }
+        reader.readAsDataURL(blob);
+      } catch (error) {
+        console.error("Failed to load and encode logo:", error);
+        setLogoError(true);
+      }
+    };
+
+    fetchAndEncodeLogo();
+  }, []);
+
   const completionDate = new Date().toLocaleDateString('en-US', {
     year: 'numeric',
     month: 'long',
@@ -58,7 +88,13 @@ const Certificate: React.FC<CertificateProps> = ({ name, score, totalQuestions, 
                     
                     <div className="absolute top-8 right-8">
                         <div className="w-28 h-28 border-4 border-amber-700 rounded-full flex items-center justify-center bg-white p-1 overflow-hidden">
-                           <img src="https://annapoornainfo.com/images/ctglogo.png" alt="Company Logo" className="max-w-full max-h-full object-contain" />
+                           {logoDataUrl && !logoError ? (
+                                <img src={logoDataUrl} alt="Company Logo" className="max-w-full max-h-full object-contain" />
+                           ) : (
+                                <div className="text-center font-bold text-2xl text-amber-800 p-2">
+                                    <span>CTG</span>
+                                </div>
+                           )}
                         </div>
                     </div>
 
